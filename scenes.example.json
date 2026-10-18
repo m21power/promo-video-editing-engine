@@ -1,0 +1,49 @@
+{
+  "app_name": "My App",
+  "tagline": "Everything in one place",
+  "outro": true,
+  "cta": "Get it on Google Play",
+  "fps": 30,
+  "scenes": [
+    {
+      "image": "01.png",
+      "duration": 3.4,
+      "motion": "push_in+float",
+      "transition": "slide_left"
+    },
+    {
+      "image": "02.png",
+      "duration": 3.2,
+      "motion": "rise+tap",
+      "transition": "swap_depth",
+      "title": "Smart reminders",
+      "subtitle": "Never miss what matters",
+      "text_effect": "typing",
+      "type_speed": 18,
+      "text_style": {
+        "text_align": "left",
+        "title_color": "#FFD166"
+      },
+      "phone_scale": 90,
+      "phone_dx": 5,
+      "phone_rot": -3
+    },
+    {
+      "image": "03.png",
+      "duration": 3.2,
+      "motion": "camera_push",
+      "transition": "zoom_through",
+      "text_effect": "off",
+      "shot": {
+        "shot_zoom": 120,
+        "shot_pan_y": -40
+      }
+    },
+    {
+      "image": "04.png",
+      "duration": 3.0,
+      "motion": "rise+float",
+      "transition": "spring"
+    }
+  ]
+}

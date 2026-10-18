@@ -1,0 +1,2 @@
+Pillow>=10.1
+pygame>=2.5      # optional: plays the audio in the promo video preview
