@@ -1,99 +1,241 @@
 # Shot Studio
 
-Local, offline GUI for turning raw emulator screenshots into Google Play promo graphics.
+Shot Studio is a local desktop app for turning emulator screenshots into polished Google Play-style promo graphics. It also includes a promo-video generator that uses the same design system for still images and motion scenes.
 
-## Run
+This project is designed to run on your own computer without any cloud service.
+
+## What this project does
+
+- Loads screenshots from a project folder
+- Lets you style the background, text, phone frame, shadows, and crop
+- Exports high-resolution PNG promo images
+- Can apply one visual style to many screenshots at once
+- Builds a promo MP4 video from multiple scenes
+
+## Requirements
+
+Before you start, make sure you have:
+
+- Python 3.9 or newer
+- Git
+- FFmpeg for the video export feature
+- A local screenshot folder such as `screenshots/raw`
+
+### Install Python
+
+Download Python from: https://www.python.org/downloads/
+
+Make sure the box “Add Python to PATH” is checked during install on Windows.
+
+### Install FFmpeg
+
+FFmpeg is required for video export.
+
+- Windows: `winget install Gyan.Dev.FFmpeg` or install from https://www.ffmpeg.org/download.html
+- macOS: `brew install ffmpeg`
+- Linux: `sudo apt install ffmpeg`
+
+After installation, confirm it works:
 
 ```bash
-pip install -r requirements.txt     # Pillow only; Tkinter ships with Python
-python main.py                      # uses ./screenshots/raw and ./screenshots/output
-python main.py --project ~/my-app   # or point at another project that has screenshots/raw
+ffmpeg -version
 ```
 
-Linux may need `sudo apt install python3-tk`.
+## Clone the project
 
-## Workflow
+Open a terminal and run:
 
-1. Put emulator screenshots in `screenshots/raw/` and pick one on the left.
-2. Edit text, phone, and style. The preview is the real composition.
-3. **Export PNG** (Ctrl+E) writes `screenshots/output/<name>_playstore.png` at full resolution.
-4. **Apply style to all** copies the look to every other screenshot, keeping each one's own title, subtitle and crop. **Export all** renders the whole set.
-
-Settings are auto-saved per screenshot in `screenshots/presets/`. **Save/Load template** stores a look anywhere.
-In the preview, drag to move the phone and scroll to resize it.
-
-## Customising
-
-| What | Where |
-| --- | --- |
-| Canvas sizes, default values, themes, frame finishes, built-in frame shapes, default fonts | `config.py` |
-| Custom background images (`.png`, `.jpg`, `.webp`) | drop into `assets/backgrounds/`, then Style tab, Background |
-| Your own fonts (`.ttf`, `.otf`) | drop into `assets/fonts/`, they appear in the font menus |
-| Your own device frames | PNG with a **transparent screen area** in `assets/frames/`; the screen shape is detected automatically |
-| New setting | add a key to `DEFAULTS` in `config.py`, use it in `core/renderer.py`, add one control line in `ui/app.py` |
-
-## Layout
-
-```
-main.py            entry point
-config.py          all tunable values
-core/renderer.py   composition (background, glow, text, phone, shadow)
-core/frames.py     procedural + PNG phone frames
-core/fonts.py      font discovery
-core/settings.py   typed settings
-ui/app.py          window, preview, export
-ui/widgets.py      slider / colour / combo builders
-ui/theme.py        dark theme
+```bash
+git clone https://github.com/<your-username>/<your-repo-name>.git
+cd <your-repo-name>
 ```
 
-All sizes are percentages of the canvas, so a design looks identical at every export size.
+If you already have the folder locally, just open it in your terminal.
 
-## Promo video
+## Set up a virtual environment
 
-Turns your screenshots into a 10-20 second MP4 using the **same look** as the stills (background, glow, phone frame, fonts, text).
-Requires [FFmpeg](https://ffmpeg.org) (`sudo apt install ffmpeg`, `brew install ffmpeg` or `winget install ffmpeg`).
+It is recommended to use a virtual environment so dependencies stay isolated.
 
-**In the app:** click **Promo video** in the top bar.
-The preview plays live and restarts whenever you change something. Each scene is its own phone: the next phone arrives while the previous one moves away, and the screenshot inside never moves. Use the **Scene / Whole video** switch to loop only the selected scene (with its transition in) while you edit it, or play everything. The *End card* row is selectable too. While exporting you also watch every frame as it renders.
-Add screenshots, set duration, motion and transition per scene, optionally give a scene its own title and subtitle,
-fill in the end card (app name, tagline, button), then scrub or press Play to preview and **Export MP4**.
-Click *Refresh look from the main window* after changing the design. The project is saved in `screenshots/presets/promo_project.json`.
+### Windows (PowerShell)
 
-**From the command line:**
+```powershell
+py -3 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+### macOS / Linux
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+The project requirements are very small:
+
+- Pillow
+- pygame (used for promo-video preview/audio)
+
+If you are on Linux and Tkinter is missing, install it separately:
+
+```bash
+sudo apt install python3-tk
+```
+
+## Run the app
+
+From the project folder:
+
+```bash
+python main.py
+```
+
+This uses the default project folder in the repo:
+
+- `screenshots/raw` for source screenshots
+- `screenshots/output` for exported PNGs
+- `screenshots/presets` for saved design presets
+
+You can also point it to another project folder:
+
+```bash
+python main.py --project "C:/path/to/your/project"
+```
+
+## Project structure
+
+```text
+shot-studio/
+├── main.py                 # app entry point
+├── promo.py                # command-line promo video generator
+├── config.py               # project settings and defaults
+├── requirements.txt        # Python dependencies
+├── README.md               # setup and usage guide
+├── assets/
+│   ├── backgrounds/
+│   ├── fonts/
+│   ├── frames/
+│   └── video/
+├── core/
+│   ├── fonts.py
+│   ├── frames.py
+│   ├── renderer.py
+│   └── settings.py
+├── ui/
+│   ├── app.py
+│   ├── theme.py
+│   ├── video_dialog.py
+│   └── widgets.py
+├── video/
+│   ├── animations.py
+│   ├── audio.py
+│   ├── engine.py
+│   ├── fx.py
+│   ├── picker.py
+│   ├── premium.py
+│   ├── timeline.py
+│   └── transitions.py
+├── screenshots/
+│   ├── raw/
+│   ├── output/
+│   └── presets/
+└── ...
+```
+
+## How to use the app
+
+1. Put your emulator screenshots into `screenshots/raw/`
+2. Open the app with `python main.py`
+3. Pick a screenshot from the left panel
+4. Adjust the text, phone frame, colours, and layout
+5. Export the PNG or apply the same design to multiple images
+6. If needed, build a promo video with the video editor tools
+
+The preview updates live while you edit, so you can see the final composition immediately.
+
+## Exporting images
+
+The app will export PNG files into:
+
+```text
+screenshots/output/
+```
+
+The exported file name usually follows this pattern:
+
+```text
+<image-name>_playstore.png
+```
+
+## Creating a promo video
+
+You can generate a video either from the app UI or using the command line.
+
+### From the app
+
+Open the app and click the “Promo video” option from the top menu.
+
+### From the command line
 
 ```bash
 python promo.py --name "My App" --tagline "Everything in one place"
 python promo.py --screens screenshots/raw --template screenshots/presets/01.json --music song.mp3 --fps 60
-python promo.py --scenes scenes.example.json      # full control per scene
+python promo.py --scenes scenes.example.json
 ```
 
-| Motions (combine with `+`) | Transitions |
-| --- | --- |
-| `push_in` `pull_out` `camera_push` `float` `rise` `tilt` `parallax` `tap` | `slide_left` `slide_right` `slide_up` `drop` `spring` `swap_depth` `zoom_through` `fade` `cut` |
+This uses the same design style and can generate MP4 output from your screenshots.
 
-Optional end-card assets in `assets/video/`: `logo.png` (shown above the app name) and `play_badge.png`
-(your official Google Play badge image, used instead of the built-in button).
-Add your own motions in `video/animations.py` and transitions in `video/transitions.py`: each is one small function.
+## Tips for a new user
 
-### Typing text and audio
+- Put only the screenshots you want to use in `screenshots/raw/`
+- Start with one screenshot and adjust the layout before exporting everything
+- Use a project folder containing only the screenshots for a single app
+- If you want custom fonts or frames, place them in `assets/fonts/` and `assets/frames/`
+- If you want custom backgrounds, place images in `assets/backgrounds/`
 
-- **Text animation**: *typing* writes the title and subtitle letter by letter with a blinking caret (letters never shift while typing); *fade* is the soft slide-in. Speed is in characters per second, and it automatically speeds up if a scene is too short to finish.
-- **Audio tracks** (all optional), mixed like tracks in a video editor:
-  - **Music**: loops to fit, volume, fade in/out.
-  - **Typing sound**: a short clip that loops *only while text is being typed* and fades out the moment typing stops.
-  - **Transition sound**: one hit at every scene change.
-  - **Lower the music while typing**: automatic ducking.
-- The preview plays the exact same mix as the export, in sync with the video, and follows Play, Pause, scrubbing and the Scene / Whole video loop. This needs `pip install pygame`; without it the preview is silent but the exported MP4 still contains the audio.
-- From the command line: `python promo.py --music song.mp3 --typing-sound typing.wav --whoosh whoosh.wav --effect typing`
+## Common issues
 
-### Per-scene control
+### `ModuleNotFoundError: No module named 'PIL'`
 
-Select a scene in the list and use the inspector under it. Everything is saved per scene:
+Run:
 
-- **Timing and motion**: duration, motion, transition and its length.
-- **Text**: effect (`default` follows the project, or `typing`, `fade`, `static`, `off`), its own title/subtitle, typing speed, start delay, and a custom style (alignment, sizes, position, colours). Choosing an effect on a scene always plays it, even when the text matches the previous scene, so you decide exactly which scenes type. *Use this effect for all scenes* applies it everywhere.
-- **Phone**: size, position and rotation for this scene only.
-- **Screenshot crop**: fit, zoom and pan per scene.
-- **Tap indicator** position, and whether this scene plays the **typing sound** and the **transition sound**.
+```bash
+pip install -r requirements.txt
+```
 
-In `scenes.json` the same options are fields of each scene (`text_effect`, `type_speed`, `text_delay`, `text_style`, `phone_scale`, `phone_dx`, `phone_dy`, `phone_rot`, `shot`, `typing_sound`, `transition_sound`, `transition_duration`).
+### `Tkinter` errors on Linux
+
+Install the package:
+
+```bash
+sudo apt install python3-tk
+```
+
+### `ffmpeg: command not found`
+
+Install FFmpeg from your OS package manager or official installer and make sure it is on your PATH.
+
+### App opens but no screenshots appear
+
+Check that your project folder contains `screenshots/raw/` and that the screenshot files are real image files like `.png`, `.jpg`, or `.webp`.
+
+## License
+
+This project is intended for local, offline use and can be customized to fit your own design workflow.
+
+## Quick start summary
+
+```bash
+git clone https://github.com/<your-username>/<your-repo-name>.git
+cd <your-repo-name>
+python3 -m venv .venv
+source .venv/bin/activate    # Windows: .\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+python main.py
+```
+
+If you want, this project can also be extended with your own device frames, fonts, backgrounds, or motion presets.
