@@ -18,7 +18,7 @@ from core.settings import Settings
 from ui import theme
 from ui.widgets import Controls, ScrollFrame
 
-IMG_EXT = {".png", ".jpg", ".jpeg", ".webp"}
+IMG_EXT = config.MEDIA_EXT    # screenshots and videos both show up in the list
 # "Apply style to all" copies everything except per-screenshot content/cropping.
 STYLE_EXCLUDE = {"title", "subtitle", "shot_zoom", "shot_pan_x", "shot_pan_y", "shot_fit"}
 
@@ -27,21 +27,30 @@ def natural_key(p):
     return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", p.name)]
 
 
+def is_video(path):
+    return Path(path).suffix.lower() in config.VIDEO_EXT
+
+
 def load_image(path):
+    """A screenshot, or for a video a representative frame (so it can be styled and exported like a screenshot)."""
+    if is_video(path):
+        from video import clips
+        from video.engine import find_ffmpeg
+        return clips.poster(find_ffmpeg(), path)
     return ImageOps.exif_transpose(Image.open(path)).convert("RGB")
 
 
 class App(tk.Tk):
-    def __init__(self, project_root):
+    def __init__(self, project_root, raw=None):
         super().__init__()
-        self.paths = config.project_paths(project_root)
+        self.paths = config.project_paths(project_root, raw or config.last_folder())
         for p in (self.paths.raw, self.paths.output, self.paths.presets, self.paths.frames, self.paths.fonts, self.paths.backgrounds):
             p.mkdir(parents=True, exist_ok=True)
         fonts.set_custom_dir(self.paths.fonts)
         frames.set_custom_dir(self.paths.frames)
         renderer.set_backgrounds_dir(self.paths.backgrounds)
 
-        self.title("Shot Studio · Google Play screenshots")
+        self.title(f"Shot Studio · {self.paths.raw.name}")
         self.geometry("1540x940")
         self.minsize(1220, 740)
         theme.apply(self)
@@ -55,6 +64,8 @@ class App(tk.Tk):
         self.current = None
         self._files = {}          # tree iid -> Path
         self._thumbs = []
+        self._vthumbs = {}        # (path, mtime) -> PIL thumbnail of a video's poster frame
+        self.folder_var = tk.StringVar(value=str(self.paths.raw))
         self._photo = None
         self._geom = (0, 0, 1, 1)
         self._img_id = None
@@ -66,7 +77,7 @@ class App(tk.Tk):
         self._suspend = False
         self._dirty = False
         self._render_job = self._save_job = None
-        self.status_var = tk.StringVar(value="Drop screenshots into screenshots/raw and pick one on the left.")
+        self.status_var = tk.StringVar(value="Choose the folder with your raw screenshots and videos on the left.")
 
         self._build_ui()
         self.refresh_files(select_first=True)
@@ -99,6 +110,7 @@ class App(tk.Tk):
         ttk.Label(bar, text="Shot Studio", style="Brand.TLabel").pack(side="left", padx=(18, 10), pady=12)
         ttk.Label(bar, text="Google Play screenshot composer", style="BarMuted.TLabel").pack(side="left")
         ttk.Button(bar, text="Export PNG", style="Accent.TButton", command=self.export_current).pack(side="right", padx=(6, 16), pady=9)
+        ttk.Button(bar, text="Folder…", command=self.choose_folder).pack(side="right", padx=3)
         ttk.Button(bar, text="Promo video", command=self.open_video).pack(side="right", padx=3)
         ttk.Button(bar, text="Export all", command=self.export_all).pack(side="right", padx=3)
         ttk.Button(bar, text="Apply style to all", command=self.apply_style_to_all).pack(side="right", padx=3)
@@ -114,9 +126,14 @@ class App(tk.Tk):
         left = ttk.Frame(body, width=290)
         left.pack(side="left", fill="y")
         left.pack_propagate(False)
+        ttk.Label(left, text="Raw folder", style="Section.TLabel").pack(anchor="w", padx=16, pady=(16, 4))
+        self.recent_cb = ttk.Combobox(left, textvariable=self.folder_var, values=self._folder_choices(), state="readonly")
+        self.recent_cb.pack(fill="x", padx=14)
+        self.recent_cb.bind("<<ComboboxSelected>>", lambda e: self.set_folder(self.folder_var.get()))
+        ttk.Button(left, text="Choose folder…", style="Accent.TButton", command=self.choose_folder).pack(fill="x", padx=14, pady=(6, 0))
         head = ttk.Frame(left)
-        head.pack(fill="x", padx=16, pady=(16, 8))
-        ttk.Label(head, text="Screenshots", style="Section.TLabel").pack(side="left")
+        head.pack(fill="x", padx=16, pady=(14, 8))
+        ttk.Label(head, text="Screenshots and videos", style="Section.TLabel").pack(side="left")
         self.count_lbl = ttk.Label(head, style="Muted.TLabel")
         self.count_lbl.pack(side="right")
         tf = ttk.Frame(left)
@@ -409,6 +426,41 @@ class App(tk.Tk):
         if w:
             w.canvas.yview_scroll(direction, "units")
 
+    # ------------------------------------------------------------------ folders
+    @staticmethod
+    def _folder_choices():
+        return config.recent_folders()
+
+    def choose_folder(self):
+        d = filedialog.askdirectory(parent=self, initialdir=self.paths.raw, mustexist=True,
+                                    title="Choose the folder with your raw screenshots and videos")
+        if d:
+            self.set_folder(d)
+
+    def set_folder(self, folder):
+        """Switch to another folder of raws. Nothing is deleted: every folder keeps its own settings and exports."""
+        folder = Path(folder).resolve()
+        if not folder.is_dir():
+            messagebox.showerror("Folder not found", str(folder))
+            return
+        self.flush_autosave()
+        new = config.project_paths(self.paths.root, folder)
+        for p in (new.raw, new.output, new.presets):
+            p.mkdir(parents=True, exist_ok=True)
+        self.paths.__dict__.update(vars(new))       # the video studio shares this object, so it follows automatically
+        config.remember_folder(folder)
+        self.recent_cb.config(values=self._folder_choices())
+        self.folder_var.set(str(folder))
+        self.title(f"Shot Studio · {folder.name}")
+        self.shot = self.current = None
+        self._dirty = False
+        self.refresh_files(select_first=True)
+        if self._video is not None and self._video.winfo_exists():
+            self._video.reload_workspace()
+        if not self._files:
+            self._queue_render()
+        self.status(f"Folder: {folder}  ·  {len(self._files)} files")
+
     # ------------------------------------------------------------------- files
     def refresh_files(self, select_first=False):
         self.tree.delete(*self.tree.get_children())
@@ -416,11 +468,19 @@ class App(tk.Tk):
         self._thumbs.clear()
         files = sorted((p for p in self.paths.raw.iterdir() if p.suffix.lower() in IMG_EXT), key=natural_key)
         for i, p in enumerate(files):
-            kw = {}
+            kw, vid = {}, is_video(p)
             try:
-                im = Image.open(p)
-                im.draft("RGB", (200, 400))
-                im = ImageOps.exif_transpose(im).convert("RGB")
+                if vid:
+                    key = (str(p), p.stat().st_mtime_ns)
+                    if key not in self._vthumbs:
+                        from video import clips
+                        from video.engine import find_ffmpeg
+                        self._vthumbs[key] = clips.poster(find_ffmpeg(), p, max_w=160)
+                    im = self._vthumbs[key].copy()
+                else:
+                    im = Image.open(p)
+                    im.draft("RGB", (200, 400))
+                    im = ImageOps.exif_transpose(im).convert("RGB")
                 im.thumbnail((44, 80), Image.Resampling.LANCZOS)
                 self._thumbs.append(ImageTk.PhotoImage(im))
                 kw["image"] = self._thumbs[-1]
@@ -428,7 +488,7 @@ class App(tk.Tk):
                 pass
             iid = f"f{i}"
             self._files[iid] = p
-            self.tree.insert("", "end", iid=iid, text="   " + p.name, **kw)
+            self.tree.insert("", "end", iid=iid, text=("  ▶ " if vid else "   ") + p.name, **kw)
         self.count_lbl.config(text=f"{len(files)} files")
         if self.current:
             for iid, p in self._files.items():
@@ -437,7 +497,7 @@ class App(tk.Tk):
         elif select_first and files:
             self.tree.selection_set("f0")
         elif not files:
-            self.status(f"No screenshots found. Add images to {self.paths.raw}")
+            self.status(f"Nothing here yet. Add screenshots or videos to {self.paths.raw}, or choose another folder.")
 
     def _on_select(self, _):
         sel = self.tree.selection()
@@ -445,8 +505,9 @@ class App(tk.Tk):
             self.load_shot(self._files[sel[0]])
 
     def browse(self):
-        p = filedialog.askopenfilename(initialdir=self.paths.raw, title="Choose a screenshot",
-                                       filetypes=[("Images", "*.png *.jpg *.jpeg *.webp")])
+        exts = " ".join("*" + e for e in sorted(config.MEDIA_EXT))
+        p = filedialog.askopenfilename(initialdir=self.paths.raw, title="Choose a screenshot or video",
+                                       filetypes=[("Screenshots and videos", exts)])
         if not p:
             return
         p = Path(p)
@@ -481,7 +542,7 @@ class App(tk.Tk):
                 pass
         self._dirty = False
         self._queue_render()
-        self.status(f"Loaded {path.name} ({img.width}×{img.height}).")
+        self.status(f"Loaded {path.name} ({img.width}×{img.height})" + (" · video: showing a poster frame; build the video in Promo video." if is_video(path) else "."))
 
     # ---------------------------------------------------- per-image auto-save
     def _queue_autosave(self):

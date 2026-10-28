@@ -5,21 +5,35 @@ Everything you are likely to tweak lives here: canvas sizes, default values for
 every control, device frame styles, frame finishes, colour themes and fonts.
 Add a key to DEFAULTS and a matching control in ui/app.py to add a new setting.
 """
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 TOOL_DIR = Path(__file__).resolve().parent
 
+IMG_EXT = {".png", ".jpg", ".jpeg", ".webp"}
+VIDEO_EXT = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}
+MEDIA_EXT = IMG_EXT | VIDEO_EXT
 
-def project_paths(root):
-    """Folders used at runtime. `root` is the project that holds screenshots/."""
+
+def project_paths(root, raw=None):
+    """Folders used at runtime.
+
+    `raw` is the folder you picked with your screenshots and videos (default: <root>/screenshots/raw).
+    Presets, the promo project and exports live next to it:
+      * a folder called "raw"  -> its parent holds presets/ and output/ (the classic screenshots/ layout)
+      * any other folder       -> <folder>/_studio/presets and <folder>/_studio/output
+    so every folder you open keeps its own settings and you never have to delete anything to switch.
+    """
     root = Path(root).resolve()
     shots = root / "screenshots"
+    raw = Path(raw).resolve() if raw else shots / "raw"
+    work = raw.parent if raw.name.lower() == "raw" else raw / "_studio"
     return SimpleNamespace(
         root=root,
-        raw=shots / "raw",
-        output=shots / "output",
-        presets=shots / "presets",          # per-screenshot settings (auto-saved)
+        raw=raw,
+        output=work / "output",
+        presets=work / "presets",           # per-screenshot settings + promo project (auto-saved)
         frames=TOOL_DIR / "assets" / "frames",   # drop custom PNG frames here
         fonts=TOOL_DIR / "assets" / "fonts",     # drop .ttf/.otf fonts here
         backgrounds=TOOL_DIR / "assets" / "backgrounds",  # drop custom background images here
@@ -129,5 +143,41 @@ DEFAULTS = dict(
 # --------------------------------------------------------------------------- #
 # Promo video defaults
 # --------------------------------------------------------------------------- #
-VIDEO = dict(fps=30, width=1080, scene_duration=3.2, outro_duration=3.2, transition=0.75,
+VIDEO = dict(fps=30, width=1440, scene_duration=3.2, outro_duration=3.2, transition=0.75,
              cta="Get it on Google Play")
+
+# export quality: name -> (x264 CRF, x264 preset). Lower CRF = better quality and bigger file.
+QUALITY = {"Draft": (26, "veryfast"), "Standard": (16, "medium"), "High": (12, "slow"),
+           "Ultra (TikTok/Reels)": (10, "slow"), "Max": (8, "slower")}
+SOCIAL_QUALITY = "Ultra (TikTok/Reels)"
+
+
+# --------------------------------------------------------------------------- #
+# Remembered folders (so the app reopens where you left off)
+# --------------------------------------------------------------------------- #
+STATE_FILE = Path.home() / ".shot_studio.json"
+
+
+def _state():
+    try:
+        return json.loads(STATE_FILE.read_text("utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def recent_folders():
+    return [f for f in _state().get("recent", []) if Path(f).is_dir()]
+
+
+def last_folder():
+    r = recent_folders()
+    return Path(r[0]) if r else None
+
+
+def remember_folder(folder):
+    folder = str(Path(folder).resolve())
+    recent = [folder] + [f for f in _state().get("recent", []) if f != folder]
+    try:
+        STATE_FILE.write_text(json.dumps({"recent": recent[:10]}, indent=2), "utf-8")
+    except OSError:
+        pass

@@ -3,24 +3,58 @@ import math
 import shutil
 import subprocess
 import tempfile
+from collections import OrderedDict
 from functools import lru_cache
 from pathlib import Path
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageOps
 
+import config
 from core import fonts, frames
 from core import renderer as R
 from core.settings import Settings
 from video import animations as A
+from video import callouts
+from video import clips as C
 from video import premium  # noqa: F401  (registers the premium motions and transitions)
 from video import transitions as T
 from video.audio import build_graph
 from video.fx import Effects
+from video.timeline import is_blank, is_video
 
 BICUBIC, LANCZOS = Image.Resampling.BICUBIC, Image.Resampling.LANCZOS
 # per-scene text style overrides allowed in a scene's `text_style`
 TEXT_STYLE_KEYS = {"title_font", "subtitle_font", "title_size", "subtitle_size", "title_color", "subtitle_color",
                    "subtitle_opacity", "text_align", "text_x", "text_y", "text_margin", "line_spacing", "text_gap"}
+
+
+def _has_ethiopic(text):
+    return any(0x1200 <= ord(c) <= 0x139F or 0x2D80 <= ord(c) <= 0x2DDF or 0xAB00 <= ord(c) <= 0xAB2F for c in str(text or ""))
+
+
+@lru_cache(maxsize=4)
+def _ethiopic_font(bold):
+    """File name of an installed / dropped-in font that can draw Amharic (Ethiopic), or None."""
+    try:
+        fams = fonts.families()
+    except Exception:
+        return None
+    keys = ("ethiopic", "abyssinica", "nyala", "jiret", "washra", "wookianos", "ethi")
+    for fam, ws in fams.items():
+        if ws and any(k in fam.lower() for k in keys):
+            return (ws.get("Bold") if bold else ws.get("Regular")) or ws.get("Regular") or ws.get("Bold") or next(iter(ws.values()))
+    for ws in fams.values():
+        for name in ws.values():
+            if any(k in str(name).lower() for k in keys):
+                return name
+    return None
+
+
+def _font_for(name, text, bold):
+    """The chosen font, or for "Auto" a font that can draw the text (Amharic needs an Ethiopic font)."""
+    if name in ("", None, "Auto") and _has_ethiopic(text):
+        return _ethiopic_font(bool(bold)) or "Auto"
+    return name or "Auto"
 
 
 def load_image(path):
@@ -42,9 +76,17 @@ def _even(n):
 
 
 class FrameRenderer:
-    def __init__(self, design, project, images, width, assets_dir=None, fx=None):
-        """images: {scene.image: PIL RGB image}. Renders RGB frames at `width` px. fx: premium effect options."""
+    def __init__(self, design, project, images, width, assets_dir=None, fx=None, raw_dir=None, live=False):
+        """images: {scene.image: PIL RGB image} for screenshot scenes. Renders RGB frames at `width` px.
+        fx: premium effect options. raw_dir: where relative media names live (needed for video scenes).
+        live=True is the editor preview: video frames decode in the background at up to 30 fps."""
         self.s, self.p, self.images = design, project, images
+        self.raw_dir, self._ff = raw_dir, None
+        self.clip_fps = min(30, int(project.fps)) if live else int(project.fps)
+        self._cl, self._posters, self._vs = {}, {}, OrderedDict()
+        self._cs = {}                                # blank scenes: cached "centre the text" shifts
+        self.outro_boxes = {}                        # end card: pixel box of every element at the last drawn frame
+        self.errors, self._reported = [], set()     # video problems, shown by the editor in its status bar
         cw, ch = R.canvas_size(design)
         k = width / cw
         self.W, self.H = _even(cw * k), _even(ch * k)
@@ -78,7 +120,7 @@ class FrameRenderer:
         assets = Path(assets_dir) if assets_dir else None
         self.logo = self._load_asset(assets, "logo.png", height=W * 0.1)
         self.logo_big = self._load_asset(assets, "logo.png", height=W * 0.30)
-        self._og, self._ob, self._assets = None, None, assets
+        self._og, self._ob, self._assets = None, {}, assets
         self.logo_shift = ((self.logo.height + W * 0.03) / H * 100) if self.logo else 0.0
         self.cta = self._make_cta(assets)
 
@@ -129,8 +171,24 @@ class FrameRenderer:
         if sc.text_effect == "off":
             return ("", "", 0.0, ())
         style = tuple(sorted((k, v) for k, v in (sc.text_style or {}).items() if k in TEXT_STYLE_KEYS))
-        return (sc.title if sc.title is not None else self.s.title,
-                sc.subtitle if sc.subtitle is not None else self.s.subtitle, 0.0, style)
+        title = sc.title if sc.title is not None else self.s.title
+        subtitle = sc.subtitle if sc.subtitle is not None else self.s.subtitle
+        shift = 0.0
+        if is_blank(sc.image):  # no phone: centre the text block vertically ("phone Y offset" nudges it)
+            shift = self._center_shift(title, subtitle, style) + sc.phone_dy
+        return (title, subtitle, shift, style)
+
+    def _center_shift(self, title, subtitle, style):
+        """How far (in % of the height) the text must move from its normal place to sit in the middle of the canvas."""
+        key = (title, subtitle, style)
+        if key not in self._cs:
+            if len(self._cs) > 40:
+                self._cs.clear()
+            blocks, _ = R.layout_text(self._settings_for(title, subtitle, 0.0, style), self.W, self.H)
+            spans = [(y, y + sum(font.getmetrics())) for b in blocks for _x, y, _line, font in b["items"]]
+            self._cs[key] = ((self.H - (max(e for _, e in spans) - min(s for s, _ in spans))) / 2
+                             - min(s for s, _ in spans)) / self.H * 100 if spans else 0.0
+        return self._cs[key]
 
     def _effect(self, seg):
         e = seg.scene.text_effect
@@ -144,11 +202,15 @@ class FrameRenderer:
     def _settings_for(self, title, subtitle, shift, style):
         d = {**self.s.to_dict(), **dict(style), "title": title, "subtitle": subtitle}
         d["text_y"] = d["text_y"] + shift
+        for key, text, bold in (("title_font", title, True), ("subtitle_font", subtitle, False)):
+            d[key] = _font_for(d.get(key, "Auto"), text, bold)   # Amharic text finds an Ethiopic font by itself
         return Settings(**d)
 
     def _text_layers(self, title, subtitle, shift, style):
         key = (title, subtitle, round(shift, 2), style)
         if key not in self._tc:
+            if len(self._tc) > 40:      # dragging text creates many layouts: keep memory bounded
+                self._tc.clear()
             blocks, _ = R.layout_text(self._settings_for(*key[:2], shift, style), self.W, self.H)
             kinds = [k for k, v in (("title", title), ("subtitle", subtitle)) if v and v.strip()]
             self._tc[key] = list(zip(kinds, R.text_masks(blocks, (self.W, self.H))))
@@ -168,6 +230,8 @@ class FrameRenderer:
         """Text laid out once; each line remembers its left edge so letters never shift while typing."""
         key = (title, subtitle, round(shift, 2), style)
         if key not in self._bl:
+            if len(self._bl) > 40:
+                self._bl.clear()
             blocks, _ = R.layout_text(self._settings_for(title, subtitle, shift, style), self.W, self.H)
             kinds = [k for k, v in (("title", title), ("subtitle", subtitle)) if v and v.strip()]
             out = []
@@ -180,6 +244,27 @@ class FrameRenderer:
                                 n=sum(len(i[2]) for i in items)))
             self._bl[key] = out
         return self._bl[key]
+
+    def text_box(self, seg):
+        """Pixel box (x0, y0, x1, y1) of a scene's title + subtitle block, or None when it shows no text.
+        The editor uses it to let you grab the text with the mouse."""
+        if seg.outro:
+            return None
+        try:
+            blocks = self._blocks(*self._text_for(seg))
+        except Exception:
+            return None
+        xs0, ys0, xs1, ys1 = [], [], [], []
+        for b in blocks:
+            for x, y, line, font in b["items"]:
+                if not line:
+                    continue
+                asc, desc = font.getmetrics()
+                xs0.append(x)
+                xs1.append(x + font.getlength(line))
+                ys0.append(y)
+                ys1.append(y + asc + desc)
+        return (min(xs0), min(ys0), max(xs1), max(ys1)) if xs0 else None
 
     def _plan(self, seg):
         """When the title and subtitle are typed (seconds from the start of the scene)."""
@@ -212,6 +297,18 @@ class FrameRenderer:
             if plan:
                 out.append((seg.start + plan["t0"], seg.start + (plan["s1"] if plan["ns"] else plan["t1"])))
         return out
+
+    def tap_times(self):
+        """Absolute seconds at which each tap indicator presses (drives the tap sound)."""
+        out = []
+        for seg in self.segs:
+            if seg.outro or is_blank(seg.scene.image):
+                continue
+            for tp in seg.scene.taps:
+                a, b = float(tp["start"]), float(tp["end"])
+                if b > a and a < seg.dur:
+                    out.append(seg.start + a + (b - a) * 0.22)  # the dot presses ~20-30% into a tap
+        return sorted(out)
 
     def whoosh_times(self):
         return [max(0.0, seg.start - 0.05) for seg in self.segs
@@ -276,6 +373,94 @@ class FrameRenderer:
             self._screens[key] = R.fit_screenshot(self.images[scene.image], self.screen_size, *key[1:])
         return self._screens[key]
 
+    # ------------------------------------------------------------------ video scenes
+    def _ffmpeg(self):
+        if self._ff is None:
+            self._ff = find_ffmpeg()
+        return self._ff
+
+    def _media_path(self, scene):
+        return resolve_image(self.raw_dir or ".", scene.image)
+
+    def _clip_for(self, scene):
+        """(Clip, loop) for a video scene. The Clip is shared and cached, so rebuilding the renderer is cheap."""
+        k = id(scene)
+        if k not in self._cl:
+            path, o = self._media_path(scene), C.opts(scene.clip)
+            info = C.probe(self._ffmpeg(), path)
+            width = -(-int(self.screen_size[0] * 2) // 64) * 64  # 2x the screen: room for zoom, rounded so it re-uses
+            self._cl[k] = (C.get_clip(self._ffmpeg(), path, o, info, width, self.clip_fps), bool(o["loop"]))
+        return self._cl[k]
+
+    def _poster(self, scene):
+        path = str(self._media_path(scene))
+        if path not in self._posters:
+            try:
+                tin = C.span(C.probe(self._ffmpeg(), path), C.opts(scene.clip))[0]
+                self._posters[path] = C.grab(self._ffmpeg(), path, tin, max_w=self.screen_size[0] * 2)
+            except Exception as exc:
+                self.errors.append(f"Could not read {Path(path).name}: {str(exc).strip().splitlines()[0] if str(exc).strip() else 'unknown error'}")
+                self._posters[path] = Image.new("RGB", self.screen_size, (24, 26, 36))
+        return self._posters[path]
+
+    def _video_screen(self, scene, lt):
+        """(frame index, the video frame fitted to the phone screen) at scene-time `lt`."""
+        clip, loop = self._clip_for(scene)
+        if clip.failed and id(clip) not in self._reported:
+            self._reported.add(id(clip))
+            self.errors.append(f"FFmpeg could not decode {scene.image}: {clip.error_text()[-200:]}")
+        idx, frame = clip.frame_at(lt, loop)
+        fit = self._shot_key(scene)[1:]
+        return idx, R.fit_screenshot(frame if frame is not None else self._poster(scene), self.screen_size, *fit)
+
+    def _screen_for(self, scene, lt):
+        return self._video_screen(scene, lt)[1] if is_video(scene.image) else self._screen_img(scene)
+
+    def _video_sprite(self, scene, lt):
+        clip = self._clip_for(scene)[0]
+        idx, screen = self._video_screen(scene, lt)
+        key = (id(clip), idx, self._shot_key(scene)[1:])
+        if idx >= 0 and key in self._vs:
+            self._vs.move_to_end(key)
+            return self._vs[key]
+        sprite = self._build_sprite(screen)
+        if idx >= 0:  # only real frames are cached (a poster stand-in must not stick)
+            self._vs[key] = sprite
+            while len(self._vs) > 5:
+                self._vs.popitem(last=False)
+        return sprite
+
+    def prepare(self, cancel=None):
+        """Export: wait until every video clip is fully decoded. False if cancelled."""
+        for seg in self.segs:
+            if not seg.outro and is_video(seg.scene.image) and not self._clip_for(seg.scene)[0].wait(cancel):
+                return False
+        return True
+
+    def clip_audio(self):
+        """The sound of every video scene as placement info for the audio mix (see video/audio.py)."""
+        out = []
+        for seg in self.segs:
+            sc = seg.scene
+            if seg.outro or not is_video(sc.image):
+                continue
+            o = C.opts(sc.clip)
+            if o["mute"] or o["volume"] <= 0:
+                continue
+            path = self._media_path(sc)
+            try:
+                info = C.probe(self._ffmpeg(), path)
+            except Exception:
+                continue
+            if not info.has_audio:
+                continue
+            tin, sp = C.span(info, o)
+            dur = min(sp / o["speed"], seg.dur)  # never longer than its scene
+            if dur >= 0.05:
+                out.append(dict(path=str(path), ss=tin, span=dur * o["speed"], speed=o["speed"],
+                                vol=o["volume"], start=seg.start, dur=dur))
+        return out
+
     def _build_sprite(self, screen):
         sprite = self.body.copy()
         layer = screen.convert("RGBA")
@@ -284,7 +469,9 @@ class FrameRenderer:
         sprite.alpha_composite(self.fa.overlay)
         return sprite
 
-    def _sprite(self, scene):  # static per screenshot + crop: built once, reused for every frame
+    def _sprite(self, scene, lt=0.0):  # screenshots: built once per crop; videos: one sprite per decoded frame
+        if is_video(scene.image):
+            return self._video_sprite(scene, lt)
         key = self._shot_key(scene)
         if key not in self._sprites:
             self._sprites[key] = self._build_sprite(self._screen_img(scene))
@@ -294,6 +481,10 @@ class FrameRenderer:
         """The scene's screen with every tap that is active at scene-time `lt` drawn on it (or None)."""
         sw, sh = self.screen_size
         screen = None
+        for color, mask, pos in callouts.layers(self.screen_size, getattr(scene, "callouts", None), lt):
+            if screen is None:  # highlights go under the tap indicators
+                screen = self._screen_for(scene, lt).copy()
+            screen.paste(color, pos, mask)
         for tp in scene.taps:
             a, b = float(tp["start"]), float(tp["end"])
             if b <= a or not a <= lt <= b:
@@ -302,14 +493,14 @@ class FrameRenderer:
             if patch is None:
                 continue
             if screen is None:
-                screen = self._screen_img(scene).copy()
+                screen = self._screen_for(scene, lt).copy()
             screen.paste((255, 255, 255), (int(tp["x"] * sw - patch.width / 2), int(tp["y"] * sh - patch.height / 2)),
                          patch.getchannel("A"))
         return self._build_sprite(screen) if screen is not None else None
 
     def _scene_sprite(self, scene, lt):
         """The phone sprite for a scene at scene-time `lt`: with tap indicators when a tap is active."""
-        return self._tap_sprite(scene, lt) or self._sprite(scene)
+        return self._tap_sprite(scene, lt) or self._sprite(scene, lt)
 
     def screen_point(self, t, fx, fy):
         """Frame pixel (fx, fy) -> (x, y) as fractions of the phone screen at time t. Used to pick a tap position."""
@@ -392,21 +583,25 @@ class FrameRenderer:
             canvas.paste(color, (round(self.cx0 - g.width / 2), round(self.cy0 - g.height / 2)), g)
 
         sheen = self.fx.sweep_progress(lt)
+        blank, prev_blank = is_blank(scene.image), prev is not None and is_blank(prev.scene.image)
         if prev is None:  # first scene: the phone fades and scales in
-            self._draw_phone(canvas, self._scene_sprite(scene, lt), cur.combine(intro), sheen)
+            if not blank:
+                self._draw_phone(canvas, self._scene_sprite(scene, lt), cur.combine(intro), sheen)
         elif in_trans and name != "cut":  # two phones: the leaving one recedes, the new one arrives on top
             tr = T.TRANSITIONS.get(name) or T.TRANSITIONS["slide_left"]
             x = lt / tdur
             p = tr.ease(x)
-            self._draw_phone(canvas, self._sprite(prev.scene), self._pose(prev, prev.dur).combine(tr.out(p)))
-            sp = self._scene_sprite(scene, lt)
-            if self.fx.on("trail") and 0 < x < 1:  # fake motion blur: faded ghosts of the arriving phone
-                for back, a in ((0.07, 0.22), (0.14, 0.10)):
-                    ghost = cur.combine(tr.inn(tr.ease(max(0.0, x - back))))
-                    ghost.alpha *= a
-                    self._draw_phone(canvas, sp, ghost)
-            self._draw_phone(canvas, sp, cur.combine(tr.inn(p)), sheen)
-        else:
+            if not prev_blank:
+                self._draw_phone(canvas, self._scene_sprite(prev.scene, max(0.0, prev.dur - 1e-3)), self._pose(prev, prev.dur).combine(tr.out(p)))
+            if not blank:
+                sp = self._scene_sprite(scene, lt)
+                if self.fx.on("trail") and 0 < x < 1:  # fake motion blur: faded ghosts of the arriving phone
+                    for back, a in ((0.07, 0.22), (0.14, 0.10)):
+                        ghost = cur.combine(tr.inn(tr.ease(max(0.0, x - back))))
+                        ghost.alpha *= a
+                        self._draw_phone(canvas, sp, ghost)
+                self._draw_phone(canvas, sp, cur.combine(tr.inn(p)), sheen)
+        elif not blank:
             self._draw_phone(canvas, self._scene_sprite(scene, lt), cur, sheen)
 
         self.fx.foreground(canvas)  # vignette: after the phones, before the text
@@ -446,9 +641,29 @@ class FrameRenderer:
             self._og = ImageOps.invert(Image.radial_gradient("L")).point(lut).resize((n, n), BICUBIC)
         return self._og
 
+    def _lay(self, key):
+        """(dx px, dy px, scale) the end card element `key` was moved / resized to in the editor."""
+        d = (getattr(self.p, "outro_layout", None) or {}).get(key) or {}
+        try:
+            return (float(d.get("dx", 0.0)) / 100 * self.W, float(d.get("dy", 0.0)) / 100 * self.H,
+                    min(4.0, max(0.2, float(d.get("scale", 1.0)))))
+        except (TypeError, ValueError):
+            return 0.0, 0.0, 1.0
+
+    def _ofont(self, which, text, bold):
+        """Font name for end card text: the end card font if one is chosen, else the look's title / subtitle font."""
+        f = getattr(self.p, "outro_font", "") or ""
+        if f and f != "Auto":
+            return f
+        return _font_for(self.s.title_font if which == "title" else self.s.subtitle_font, text, bold)
+
     def _outro_badge(self):
-        """Play badge sized to fit a fixed box; if the PNG is only the icon, wrap it in a 'GET IT ON Google Play' pill."""
-        if self._ob is None:
+        """Store badge sized to fit a fixed box; if the PNG is only the icon (or missing) it is wrapped in a pill whose
+        two lines of text are yours (any language). A real wide badge PNG is used as it is."""
+        p = self.p
+        small, big = (getattr(p, "outro_badge_small", "") or "").strip(), (getattr(p, "outro_badge_big", "") or "").strip()
+        key = (small, big, getattr(p, "outro_font", ""), self.s.title_font, self.s.subtitle_font)
+        if key not in self._ob:
             W, H = self.W, self.H
             raw, a = None, self._assets
             if a and (a / "play_badge.png").exists():
@@ -472,10 +687,22 @@ class FrameRenderer:
                     ic = raw.resize((max(1, round(raw.width * ih / raw.height)), round(ih)), LANCZOS)
                     pill.alpha_composite(ic, (round(x), round((h - ic.height) / 2)))
                     x += ic.width + h * 0.2
-                d.text((x, h * 0.32), "GET IT ON", font=fonts.load_font(self.s.subtitle_font, int(h * 0.19), False),
-                       fill=(210, 214, 226, 255), anchor="lm")
-                d.text((x, h * 0.65), "Google Play", font=fonts.load_font(self.s.title_font, int(h * 0.34), True),
-                       fill=(255, 255, 255, 255), anchor="lm")
+                room = w - x - h * 0.28
+
+                def fit(text, which, size, bold):
+                    name = self._ofont(which, text, bold)
+                    f = fonts.load_font(name, int(size), bold)
+                    while size > 8 and f.getlength(text) > room:
+                        size *= 0.92
+                        f = fonts.load_font(name, int(size), bold)
+                    return f
+
+                if small and big:
+                    d.text((x, h * 0.32), small, font=fit(small, "sub", h * 0.19, False), fill=(210, 214, 226, 255), anchor="lm")
+                    d.text((x, h * 0.65), big, font=fit(big, "title", h * 0.34, True), fill=(255, 255, 255, 255), anchor="lm")
+                elif small or big:  # one line: centred vertically and a little bigger
+                    t1 = big or small
+                    d.text((x, h * 0.5), t1, font=fit(t1, "title", h * 0.36, True), fill=(255, 255, 255, 255), anchor="lm")
                 badge = pill.resize((w // S, h // S), LANCZOS)
             m = int(W * 0.04)
             out = Image.new("RGBA", (badge.width + 2 * m, badge.height + 2 * m), (0, 0, 0, 0))
@@ -483,8 +710,10 @@ class FrameRenderer:
             sh.paste(badge.getchannel("A"), (m, m + int(W * 0.012)))
             out.paste((0, 0, 0), (0, 0), sh.filter(ImageFilter.GaussianBlur(W * 0.014)).point(_lut(45)))
             out.alpha_composite(badge, (m, m))
-            self._ob = out
-        return self._ob
+            if len(self._ob) > 6:
+                self._ob.clear()
+            self._ob[key] = (out, m)
+        return self._ob[key]
 
     @staticmethod
     def _fit_font(name, text, size, max_w, bold=True):
@@ -502,20 +731,33 @@ class FrameRenderer:
         ImageDraw.Draw(mask).text((cx, cy), text, font=font, fill=255, anchor="mm")
         canvas.paste(color, (0, 0), mask.point(_lut(round(a * opacity))))
 
+    @staticmethod
+    def _tbox(font, text, cx, cy):
+        l, t, r, b = font.getbbox(text, anchor="mm")
+        return (cx + l, cy + t, cx + r, cy + b)
+
+    @staticmethod
+    def _union(a, b):
+        return b if a is None else (min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3]))
+
     def _draw_outro(self, canvas, lt):
-        """End card without the phone: logo, name, tagline, divider, 'download now' line and the Play badge."""
+        """End card without the phone: logo, name, tagline, divider, two lines of text and the store badge.
+        Every text is yours (any language); every element can be moved and resized (project.outro_layout).
+        The pixel box of each element is stored in self.outro_boxes for the editor."""
         s, p, W, H = self.s, self.p, self.W, self.H
         ease = lambda d, dur=0.7: A.ease_out(A.clamp01((lt - d) / dur))
         accent = R.rgb(s.glow_color, (60, 120, 240))
         white = R.rgb(s.title_color, (255, 255, 255))
         soft = R.rgb(s.subtitle_color, (205, 210, 225))
-        lcy = H * 0.28
+        boxes = {}
+        ldx, ldy, lsc = self._lay("logo")
+        lcx, lcy = W / 2 + ldx, H * 0.28 + ldy
         bob = math.sin(lt * 1.6) * H * 0.004
 
-        # background glow (slowly pulsing)
+        # background glow (slowly pulsing) follows the logo
         g = self._outro_glow()
         ga = ease(0, 1.0) * (0.8 + 0.2 * math.sin(lt * 2.2)) * 0.75
-        canvas.paste(accent, (round(W / 2 - g.width / 2), round(lcy - g.height / 2)), g.point(_lut(round(ga * 100))))
+        canvas.paste(accent, (round(lcx - g.width / 2), round(lcy - g.height / 2)), g.point(_lut(round(ga * 100))))
 
         # floating sparkles
         sp = Image.new("L", canvas.size, 0)
@@ -533,7 +775,7 @@ class FrameRenderer:
 
         # logo + expanding ripples
         lg = self.logo_big
-        r = W * 0.14 if lg is None else max(lg.width, lg.height) / 2
+        r = (W * 0.14 if lg is None else max(lg.width, lg.height) / 2) * lsc
         for i in range(2):
             ph = (lt * 0.45 + i * 0.5) % 1
             al = (1 - ph) ** 1.5 * 0.5 * ease(0.5, 0.6)
@@ -543,56 +785,92 @@ class FrameRenderer:
                 m = Image.new("L", (n, n), 0)
                 ImageDraw.Draw(m).ellipse((4, 4, n - 4, n - 4), outline=255, width=max(2, int(W * 0.003 * S)))
                 m = m.resize((n // S, n // S), LANCZOS).point(_lut(round(al * 100)))
-                canvas.paste(accent, (round(W / 2 - m.width / 2), round(lcy + bob - m.height / 2)), m)
+                canvas.paste(accent, (round(lcx - m.width / 2), round(lcy + bob - m.height / 2)), m)
         if lg is not None:
             e = ease(0.1, 0.9)
-            k = 0.75 + 0.25 * e
+            k = (0.75 + 0.25 * e) * lsc
             im = lg.resize((max(2, round(lg.width * k)), max(2, round(lg.height * k))), BICUBIC)
             a = im.getchannel("A").point(_lut(round(e * 100)))
-            canvas.paste(im, (round(W / 2 - im.width / 2), round(lcy + bob - im.height / 2)), a)
+            canvas.paste(im, (round(lcx - im.width / 2), round(lcy + bob - im.height / 2)), a)
+            boxes["logo"] = (lcx - lg.width * lsc / 2, lcy + bob - lg.height * lsc / 2,
+                             lcx + lg.width * lsc / 2, lcy + bob + lg.height * lsc / 2)
+        else:
+            boxes["logo"] = (lcx - r, lcy + bob - r, lcx + r, lcy + bob + r)
 
-        # app name + tagline
-        e = ease(0.45)
-        f = self._fit_font(s.title_font, p.app_name, W * 0.095, W * 0.84)
-        self._o_text(canvas, p.app_name, f, white, W / 2, H * 0.445 + (1 - e) * H * 0.02, e)
+        # app name
+        name = (p.app_name or "").strip()
+        if name:
+            dx, dy, sc = self._lay("name")
+            e = ease(0.45)
+            f = self._fit_font(self._ofont("title", name, True), name, W * 0.095 * sc, W * 0.94)
+            cx, cy = W / 2 + dx, H * 0.445 + dy + (1 - e) * H * 0.02
+            self._o_text(canvas, name, f, white, cx, cy, e)
+            boxes["name"] = self._tbox(f, name, cx, cy)
+
+        # tagline (wraps; any language)
         tag = (p.tagline or "").strip()
         if tag:
+            dx, dy, sc = self._lay("tagline")
             e = ease(0.65)
-            tf = fonts.load_font(s.subtitle_font, int(W * 0.038), False)
+            tf = fonts.load_font(self._ofont("sub", tag, False), max(6, int(W * 0.038 * sc)), False)
             lines, cur = [], ""
             for word in tag.split():
                 t2 = (cur + " " + word).strip()
-                if cur and tf.getlength(t2) > W * 0.8:
+                if cur and tf.getlength(t2) > W * 0.86:
                     lines.append(cur)
                     cur = word
                 else:
                     cur = t2
             lines.append(cur)
-            for i, ln in enumerate(lines[:3]):
-                self._o_text(canvas, ln, tf, soft, W / 2, H * 0.495 + i * W * 0.052 + (1 - e) * H * 0.02, e, 80)
+            box = None
+            for i, ln in enumerate(lines[:4]):
+                cx, cy = W / 2 + dx, H * 0.495 + dy + i * W * 0.052 * sc + (1 - e) * H * 0.02
+                self._o_text(canvas, ln, tf, soft, cx, cy, e, 80)
+                box = self._union(box, self._tbox(tf, ln, cx, cy))
+            boxes["tagline"] = box
 
         # divider
+        dx, dy, sc = self._lay("divider")
         e = ease(0.85, 0.6)
         if e > 0.01:
-            w, y = W * 0.18 * e, H * 0.575
-            ImageDraw.Draw(canvas).rounded_rectangle((W / 2 - w / 2, y, W / 2 + w / 2, y + max(2, W * 0.004)),
-                                                     radius=2, fill=accent)
+            w, y, cx = W * 0.18 * e * sc, H * 0.575 + dy, W / 2 + dx
+            th = max(2, W * 0.004)
+            ImageDraw.Draw(canvas).rounded_rectangle((cx - w / 2, y, cx + w / 2, y + th), radius=2, fill=accent)
+            boxes["divider"] = (cx - W * 0.09 * sc, y - 2, cx + W * 0.09 * sc, y + th + 2)
 
-        # call to action text
-        e = ease(1.0)
-        hf = self._fit_font(s.title_font, "GO DOWNLOAD IT NOW", W * 0.058, W * 0.84)
-        self._o_text(canvas, "GO DOWNLOAD IT NOW", hf, white, W / 2, H * 0.635 + (1 - e) * H * 0.02, e)
-        e = ease(1.15)
-        sf = fonts.load_font(s.subtitle_font, int(W * 0.04), False)
-        self._o_text(canvas, "from the Play Store", sf, soft, W / 2, H * 0.677 + (1 - e) * H * 0.02, e, 85)
+        # big line (default "GO DOWNLOAD IT NOW") and small line (default "from the Play Store")
+        head = (p.outro_headline or "").strip()
+        if head:
+            dx, dy, sc = self._lay("headline")
+            e = ease(1.0)
+            hf = self._fit_font(self._ofont("title", head, True), head, W * 0.058 * sc, W * 0.94)
+            cx, cy = W / 2 + dx, H * 0.635 + dy + (1 - e) * H * 0.02
+            self._o_text(canvas, head, hf, white, cx, cy, e)
+            boxes["headline"] = self._tbox(hf, head, cx, cy)
+        subl = (p.outro_subline or "").strip()
+        if subl:
+            dx, dy, sc = self._lay("subline")
+            e = ease(1.15)
+            sf = self._fit_font(self._ofont("sub", subl, False), subl, W * 0.04 * sc, W * 0.94, bold=False)
+            cx, cy = W / 2 + dx, H * 0.677 + dy + (1 - e) * H * 0.02
+            self._o_text(canvas, subl, sf, soft, cx, cy, e, 85)
+            boxes["subline"] = self._tbox(sf, subl, cx, cy)
 
-        # Play badge, floating gently
-        c = self._outro_badge()
-        e = ease(1.3)
-        if e > 0.004:
-            cy = H * 0.775 + (1 - e) * H * 0.04 + math.sin(lt * 2.0) * H * 0.004
-            pos = (round(W / 2 - c.width / 2), round(cy - c.height / 2))
-            canvas.paste(c, pos, c.getchannel("A").point(_lut(round(e * 100))))
+        # store badge, floating gently
+        if getattr(p, "outro_badge", True):
+            dx, dy, sc = self._lay("badge")
+            c, m = self._outro_badge()
+            e = ease(1.3)
+            if e > 0.004:
+                if abs(sc - 1) > 1e-3:
+                    c = c.resize((max(2, round(c.width * sc)), max(2, round(c.height * sc))), BICUBIC)
+                    m = m * sc
+                cx = W / 2 + dx
+                cy = H * 0.775 + dy + (1 - e) * H * 0.04 + math.sin(lt * 2.0) * H * 0.004
+                pos = (round(cx - c.width / 2), round(cy - c.height / 2))
+                canvas.paste(c, pos, c.getchannel("A").point(_lut(round(e * 100))))
+                boxes["badge"] = (pos[0] + m, pos[1] + m, pos[0] + c.width - m, pos[1] + c.height - m)
+        self.outro_boxes = boxes
 
 
 # ---------------------------------------------------------------------- FFmpeg
@@ -609,21 +887,32 @@ def find_ffmpeg():
                            "  Windows: winget install ffmpeg\n(or: pip install imageio-ffmpeg)")
 
 
-def render_video(design, project, images, out_path, width=None, progress=None, cancel=None, assets_dir=None, fx=None):
+def render_video(design, project, images, out_path, width=None, progress=None, cancel=None, assets_dir=None, fx=None,
+                 raw_dir=None):
     """Render the project to an H.264 MP4. Returns True on success, False if cancelled."""
     ffmpeg = find_ffmpeg()
-    fr = FrameRenderer(design, project, images, width or project.width, assets_dir, fx)
+    fr = FrameRenderer(design, project, images, width or project.width, assets_dir, fx, raw_dir=raw_dir)
+    if not fr.prepare(cancel):  # decode the video clips first (they are then random-access, exact frames)
+        return False
     fps = int(project.fps)
     n = max(1, round(fr.total * fps))
-    g = build_graph(project, fr.total, fr.typing_intervals(), fr.whoosh_times(), first=1)
+    crf, preset = config.QUALITY.get(project.quality, config.QUALITY["Standard"])
+    g = build_graph(project, fr.total, fr.typing_intervals(), fr.whoosh_times(), first=1, clips=fr.clip_audio(),
+                    tap_t=fr.tap_times())
     cmd = [ffmpeg, "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
            "-video_size", f"{fr.W}x{fr.H}", "-framerate", str(fps), "-i", "-"]
     if g:
         cmd += g[0] + ["-filter_complex", g[1], "-map", "0:v", "-map", "[aout]"]
-    cmd += ["-vf", "scale=out_color_matrix=bt709:out_range=tv,format=yuv420p", "-c:v", "libx264", "-preset", "medium",
-            "-crf", "16", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
-            "-movflags", "+faststart", "-r", str(fps), "-t", f"{fr.total:.3f}"]
-    cmd += ["-c:a", "aac", "-b:a", "192k"] if g else ["-an"]
+    # Top-quality H.264 for TikTok / Reels / Shorts (they re-encode, so we give them a very clean, sharp source)
+    vf = "scale=out_color_matrix=bt709:out_range=tv:flags=bicubic+accurate_rnd+full_chroma_int,format=yuv420p"
+    cmd += ["-vf", vf, "-c:v", "libx264", "-preset", preset, "-crf", str(crf),
+            "-profile:v", "high", "-pix_fmt", "yuv420p",
+            "-x264-params", "aq-mode=3:aq-strength=0.9:deblock=-1,-1:bframes=3:ref=4",  # aq-mode 3 = less banding in gradients
+            "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv"]
+    if crf <= 12:  # cap spikes so every phone decodes it smoothly
+        cmd += ["-maxrate", "80M", "-bufsize", "160M"]
+    cmd += ["-g", str(fps * 2), "-movflags", "+faststart", "-r", str(fps), "-t", f"{fr.total:.3f}"]
+    cmd += ["-c:a", "aac", "-b:a", "256k", "-ar", "44100"] if g else ["-an"]
     cmd.append(str(out_path))
 
     err = tempfile.TemporaryFile()
