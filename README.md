@@ -1,85 +1,63 @@
 # Shot Studio
 
-Shot Studio is a local desktop app for turning emulator screenshots into polished Google Play-style promo graphics. It also includes a promo-video generator that uses the same design system for still images and motion scenes.
+Shot Studio is a local desktop app for turning app screenshots and promo footage into polished Google Play-style marketing graphics. It can compose still promo images, apply one design across many shots, and render MP4 promo videos from the same visual system.
 
-This project is designed to run on your own computer without any cloud service.
+This project is designed to stay fully local and offline. No cloud service is required.
 
-## What this project does
+## What it does
 
-- Loads screenshots from a project folder
-- Lets you style the background, text, phone frame, shadows, and crop
-- Exports high-resolution PNG promo images
-- Can apply one visual style to many screenshots at once
-- Builds a promo MP4 video from multiple scenes
+- Loads screenshots and videos from a selected raw folder
+- Lets you edit text, layout, phone frame, colors, glow, background, and crop in a live preview
+- Exports high-resolution PNG promo images for app stores and landing pages
+- Applies one style across an entire batch of images
+- Saves and reloads reusable design presets
+- Builds promo videos with scene timing, transitions, music, and ending cards
+- Supports custom device frames, fonts, and background images
 
 ## Requirements
 
-Before you start, make sure you have:
-
-- Python 3.9 or newer
-- Git
-- FFmpeg for the video export feature
-- A local screenshot folder such as `screenshots/raw`
+- Python 3.9+
+- Tkinter for the desktop UI
+- FFmpeg for video export
+- A source folder containing screenshots and/or videos
 
 ### Install Python
 
-Download Python from: https://www.python.org/downloads/
-
-Make sure the box “Add Python to PATH” is checked during install on Windows.
+Download Python from https://www.python.org/downloads/ and make sure the installer adds Python to PATH on Windows.
 
 ### Install FFmpeg
 
-FFmpeg is required for video export.
+FFmpeg is required for promo-video export.
 
 - Windows: `winget install Gyan.Dev.FFmpeg` or install from https://www.ffmpeg.org/download.html
 - macOS: `brew install ffmpeg`
 - Linux: `sudo apt install ffmpeg`
 
-After installation, confirm it works:
+Verify installation:
 
 ```bash
 ffmpeg -version
 ```
 
-## Clone the project
+## Install dependencies
 
-Open a terminal and run:
-
-```bash
-git clone https://github.com/<your-username>/<your-repo-name>.git
-cd <your-repo-name>
-```
-
-If you already have the folder locally, just open it in your terminal.
-
-## Set up a virtual environment
-
-It is recommended to use a virtual environment so dependencies stay isolated.
-
-### Windows (PowerShell)
-
-```powershell
-py -3 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-```
-
-### macOS / Linux
+Clone the project and set up a virtual environment:
 
 ```bash
+git clone <your-repo-url>
+cd <your-repo-folder>
 python3 -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate   # Windows: .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-The project requirements are very small:
+The project dependencies are small:
 
 - Pillow
-- pygame (used for promo-video preview/audio)
+- pygame
 
-If you are on Linux and Tkinter is missing, install it separately:
+If your Linux environment is missing Tkinter, install it as well:
 
 ```bash
 sudo apt install python3-tk
@@ -87,23 +65,26 @@ sudo apt install python3-tk
 
 ## Run the app
 
-From the project folder:
+From the project root:
 
 ```bash
 python main.py
 ```
 
-This uses the default project folder in the repo:
+The app defaults to the repo-local project layout:
 
-- `screenshots/raw` for source screenshots
+- `screenshots/raw` for source files
 - `screenshots/output` for exported PNGs
 - `screenshots/presets` for saved design presets
 
-You can also point it to another project folder:
+You can also point it to another project folder or a different raw folder:
 
 ```bash
-python main.py --project "C:/path/to/your/project"
+python main.py --project "/path/to/project"
+python main.py --raw "/path/to/raw/screenshots"
 ```
+
+The app remembers recently used folders, so you can switch between projects without moving files.
 
 ## Project structure
 
@@ -111,14 +92,16 @@ python main.py --project "C:/path/to/your/project"
 shot-studio/
 ├── main.py                 # app entry point
 ├── promo.py                # command-line promo video generator
-├── config.py               # project settings and defaults
-├── requirements.txt        # Python dependencies
-├── README.md               # setup and usage guide
+├── config.py               # defaults, canvas sizes, themes, project paths
+├── circle_cropper.py       # helper for crop/circle operations
+├── requirements.txt        # python dependencies
+├── README.md               # project docs
+├── scenes.example.json     # example scene JSON for video generation
 ├── assets/
-│   ├── backgrounds/
-│   ├── fonts/
-│   ├── frames/
-│   └── video/
+│   ├── backgrounds/       # custom background images
+│   ├── fonts/             # custom fonts (.ttf/.otf)
+│   ├── frames/            # custom phone/device frame PNGs
+│   └── video/             # optional promo assets like logo.png / play_badge.png
 ├── core/
 │   ├── fonts.py
 │   ├── frames.py
@@ -126,57 +109,87 @@ shot-studio/
 │   └── settings.py
 ├── ui/
 │   ├── app.py
+│   ├── audio_cropper.py
+│   ├── clip_editor.py
 │   ├── theme.py
 │   ├── video_dialog.py
 │   └── widgets.py
 ├── video/
 │   ├── animations.py
 │   ├── audio.py
+│   ├── clips.py
 │   ├── engine.py
 │   ├── fx.py
 │   ├── picker.py
 │   ├── premium.py
 │   ├── timeline.py
-│   └── transitions.py
+│   ├── transitions.py
+│   └── __init__.py
 ├── screenshots/
-│   ├── raw/
-│   ├── output/
-│   └── presets/
+│   ├── raw/               # source screenshots/videos
+│   ├── output/            # exported PNG files
+│   └── presets/           # saved design presets and promo settings
 └── ...
 ```
 
-## How to use the app
+## How the app workflow works
 
-1. Put your emulator screenshots into `screenshots/raw/`
-2. Open the app with `python main.py`
-3. Pick a screenshot from the left panel
-4. Adjust the text, phone frame, colours, and layout
-5. Export the PNG or apply the same design to multiple images
-6. If needed, build a promo video with the video editor tools
+1. Put screenshots or videos into a raw folder.
+2. Open Shot Studio.
+3. Use the left panel to choose a project/raw folder.
+4. Pick a screenshot or video from the list.
+5. Adjust the app title/subtitle, frame style, colors, glow, and layout in the live preview.
+6. Export the current image, export all images, or save a reusable preset.
+7. Open the promo-video workflow to generate an MP4 from scenes and audio.
 
-The preview updates live while you edit, so you can see the final composition immediately.
+The preview updates live while you edit, so visual changes are visible immediately.
 
-## Exporting images
+## Exporting static promo images
 
-The app will export PNG files into:
+The app exports PNGs to:
 
 ```text
 screenshots/output/
 ```
 
-The exported file name usually follows this pattern:
+or to a project-scoped output folder created beside the raw folder when using a custom project layout.
+
+If the raw folder is named `raw`, the app stores additional project data in the parent folder:
 
 ```text
-<image-name>_playstore.png
+<project>/screenshots/
+├── raw/
+├── output/
+└── presets/
 ```
 
-## Creating a promo video
+If the raw folder is something else, the app uses a folder-local `_studio` structure:
 
-You can generate a video either from the app UI or using the command line.
+```text
+<folder>/
+├── raw-or-custom-name/
+├── _studio/
+│   ├── output/
+│   └── presets/
+```
+
+## Saving and reusing styles
+
+The app includes:
+
+- `Load template`
+- `Save template`
+- `Apply style to all`
+
+This lets you design one look and then reuse it across many images without overwriting per-shot text or crop settings.
+
+## Promo video generation
+
+You can build a promo video either from the app UI or from the command line.
 
 ### From the app
 
-Open the app and click the “Promo video” option from the top menu.
+Open the app and click the `Promo video` button in the toolbar.
 
 ### From the command line
 
@@ -186,21 +199,43 @@ python promo.py --screens screenshots/raw --template screenshots/presets/01.json
 python promo.py --scenes scenes.example.json
 ```
 
-This uses the same design style and can generate MP4 output from your screenshots.
+The CLI supports:
 
-## Tips for a new user
+- `--project` and `--raw` folder selection
+- `--screens` for explicit screenshot/video files or folders
+- `--template` for reusing a saved design preset
+- `--scenes` for a full scene list/JSON project definition
+- `--music`, `--quality`, `--fps`, `--duration`, and `--out` controls
+- end-card headline/subline and outro toggles
 
-- Put only the screenshots you want to use in `screenshots/raw/`
-- Start with one screenshot and adjust the layout before exporting everything
-- Use a project folder containing only the screenshots for a single app
-- If you want custom fonts or frames, place them in `assets/fonts/` and `assets/frames/`
-- If you want custom backgrounds, place images in `assets/backgrounds/`
+## Custom assets
 
-## Common issues
+You can extend the app by placing files in these folders:
+
+- `assets/backgrounds/` for custom background images
+- `assets/frames/` for device or frame PNGs
+- `assets/fonts/` for custom `.ttf` or `.otf` fonts
+- `assets/video/` for optional promo graphics like `logo.png` and `play_badge.png`
+
+The app scans these folders automatically to populate the built-in pickers in the UI.
+
+## Typical usage flow
+
+```bash
+python main.py
+```
+
+Then:
+
+1. choose your raw folder
+2. pick a screenshot
+3. tune the layout and theme
+4. export the PNGs or save them as a template
+5. create a promo MP4 using the same look
+
+## Troubleshooting
 
 ### `ModuleNotFoundError: No module named 'PIL'`
-
-Run:
 
 ```bash
 pip install -r requirements.txt
@@ -208,29 +243,27 @@ pip install -r requirements.txt
 
 ### `Tkinter` errors on Linux
 
-Install the package:
-
 ```bash
 sudo apt install python3-tk
 ```
 
 ### `ffmpeg: command not found`
 
-Install FFmpeg from your OS package manager or official installer and make sure it is on your PATH.
+Install FFmpeg and ensure it is in your PATH.
 
-### App opens but no screenshots appear
+### App opens but no images show up
 
-Check that your project folder contains `screenshots/raw/` and that the screenshot files are real image files like `.png`, `.jpg`, or `.webp`.
+Check that your raw folder contains real image or video files such as `.png`, `.jpg`, `.jpeg`, `.webp`, `.mp4`, `.mov`, or `.webm`.
 
 ## License
 
-This project is intended for local, offline use and can be customized to fit your own design workflow.
+This project is intended for local, offline use and can be adapted to your own design workflow.
 
-## Quick start summary
+## Quick start
 
 ```bash
-git clone https://github.com/<your-username>/<your-repo-name>.git
-cd <your-repo-name>
+git clone <your-repo-url>
+cd <your-repo-folder>
 python3 -m venv .venv
 source .venv/bin/activate    # Windows: .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
@@ -238,4 +271,4 @@ pip install -r requirements.txt
 python main.py
 ```
 
-If you want, this project can also be extended with your own device frames, fonts, backgrounds, or motion presets.
+If you want to go further, this project can also be extended with your own frames, fonts, motion presets, or branded end-card assets.
