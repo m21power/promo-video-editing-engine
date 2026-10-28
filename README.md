@@ -22,10 +22,16 @@ Two ways to work with the same design system:
 </div>
 
 <div align="center" style="margin-top: 18px;">
-  <video controls width="820" playsinline preload="metadata" poster="Example/2.png">
-    <source src="https://drive.usercontent.google.com/download?id=1KfY38gm6mqLovcw2uf00ZxRnu0RNLK92&export=download" type="video/mp4" />
-  </video>
+  <a href="https://drive.google.com/file/d/1KfY38gm6mqLovcw2uf00ZxRnu0RNLK92/view?usp=sharing" target="_blank">
+    <img src="Example/2.png" alt="Open promo video on Google Drive" width="820" />
+  </a>
 </div>
+
+<p align="center">
+  <a href="https://drive.google.com/file/d/1KfY38gm6mqLovcw2uf00ZxRnu0RNLK92/view?usp=sharing" target="_blank">
+    ▶ Watch the promo video on Google Drive
+  </a>
+</p>
 
 Shot Studio is a local desktop app for turning app screenshots and promo footage into polished Google Play-style marketing graphics. It can compose still promo images, apply one design across many shots, and render MP4 promo videos from the same visual system.
 
