@@ -1,5 +1,32 @@
 # Shot Studio
 
+## At a glance
+
+Two ways to work with the same design system:
+
+<div align="center">
+  <table>
+    <tr>
+      <td align="center">
+        <img src="Example/1.png" alt="Screenshot editor preview" width="420" />
+        <br />
+        <strong>Screenshot creator</strong>
+      </td>
+      <td align="center">
+        <img src="Example/2.png" alt="Promo video design preview" width="420" />
+        <br />
+        <strong>Video promo scene</strong>
+      </td>
+    </tr>
+  </table>
+</div>
+
+<div align="center" style="margin-top: 18px;">
+  <video controls width="820" playsinline muted loop>
+    <source src="Example/ማሕሌት_ዘቅዱስ_ያሬድ_promo.mp4" type="video/mp4" />
+  </video>
+</div>
+
 Shot Studio is a local desktop app for turning app screenshots and promo footage into polished Google Play-style marketing graphics. It can compose still promo images, apply one design across many shots, and render MP4 promo videos from the same visual system.
 
 This project is designed to stay fully local and offline. No cloud service is required.
