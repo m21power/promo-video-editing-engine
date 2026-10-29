@@ -152,7 +152,7 @@ class FrameRenderer:
             d.rounded_rectangle((0, 0, w - 1, h - 1), radius=h / 2, fill=(255, 255, 255, 255))
             x0, cy = padx, h / 2
             d.polygon([(x0, cy - icon * 0.62), (x0, cy + icon * 0.62), (x0 + icon, cy)], fill=R.rgb(self.s.glow_color, (60, 120, 240)))
-            d.text((x0 + icon + W * 0.025 * S, cy), label, font=font, fill=(16, 18, 28, 255), anchor="lm")
+            fonts.draw_text(d, (x0 + icon + W * 0.025 * S, cy), label, font, (16, 18, 28, 255), "lm", pill)
             img = pill.resize((w // S, h // S), LANCZOS)
         m = int(W * 0.04)  # room for a soft shadow
         out = Image.new("RGBA", (img.width + 2 * m, img.height + 2 * m), (0, 0, 0, 0))
@@ -217,13 +217,20 @@ class FrameRenderer:
         return self._tc[key]
 
     def _draw_text(self, canvas, text, a_title, a_sub, dy_title, dy_sub):
-        for kind, (color, mask) in self._text_layers(*text):
+        for kind, layer in self._text_layers(*text):
+            color, mask = layer
             a, dy = (a_title, dy_title) if kind == "title" else (a_sub, dy_sub)
             if a <= 0.004:
                 continue
+            emo = getattr(layer, "emoji", None)   # colour emoji of this block
             if a < 0.996:
                 mask = mask.point(_lut(round(a * 100)))
+                if emo is not None:
+                    emo = emo.copy()
+                    emo.putalpha(emo.getchannel("A").point(_lut(round(a * 100))))
             canvas.paste(color, (0, int(dy)), mask)
+            if emo is not None:
+                canvas.paste(emo, (0, int(dy)), emo)
 
     # ------------------------------------------------------------------ typing
     def _blocks(self, title, subtitle, shift, style):
@@ -329,6 +336,7 @@ class FrameRenderer:
         for b in self._blocks(*text):
             mask = Image.new("L", canvas.size, 0)
             d = ImageDraw.Draw(mask)
+            emo = Image.new("RGBA", canvas.size, (0, 0, 0, 0)) if any(fonts.has_emoji(it[2]) for it in b["items"]) else None
             left = count[b["kind"]]
             last = first = None
             for x, y, line, font in b["items"]:
@@ -338,7 +346,7 @@ class FrameRenderer:
                 part = line[:left]
                 left -= len(line)
                 if part:
-                    d.text((x, y), part, font=font, fill=255, anchor="la")
+                    fonts.draw_text(d, (x, y), part, font, 255, "la", emo)
                     last = (x + font.getlength(part), y, font)
             if caret == b["kind"] and (last or first):
                 cx, cy, font = last or first
@@ -347,7 +355,11 @@ class FrameRenderer:
                 d.rectangle((cx + bw * 0.4, cy + (asc + desc) * 0.1, cx + bw * 1.4, cy + (asc + desc) * 0.92), fill=255)
             if b["opacity"] < 100:
                 mask = mask.point(_lut(b["opacity"]))
+                if emo is not None:
+                    emo.putalpha(emo.getchannel("A").point(_lut(b["opacity"])))
             canvas.paste(b["color"], (0, 0), mask)
+            if emo is not None:
+                canvas.paste(emo, (0, 0), emo)
 
     # ------------------------------------------------------------------ phones
     def _seg_at(self, t):
@@ -698,11 +710,11 @@ class FrameRenderer:
                     return f
 
                 if small and big:
-                    d.text((x, h * 0.32), small, font=fit(small, "sub", h * 0.19, False), fill=(210, 214, 226, 255), anchor="lm")
-                    d.text((x, h * 0.65), big, font=fit(big, "title", h * 0.34, True), fill=(255, 255, 255, 255), anchor="lm")
+                    fonts.draw_text(d, (x, h * 0.32), small, fit(small, "sub", h * 0.19, False), (210, 214, 226, 255), "lm", pill)
+                    fonts.draw_text(d, (x, h * 0.65), big, fit(big, "title", h * 0.34, True), (255, 255, 255, 255), "lm", pill)
                 elif small or big:  # one line: centred vertically and a little bigger
                     t1 = big or small
-                    d.text((x, h * 0.5), t1, font=fit(t1, "title", h * 0.36, True), fill=(255, 255, 255, 255), anchor="lm")
+                    fonts.draw_text(d, (x, h * 0.5), t1, fit(t1, "title", h * 0.36, True), (255, 255, 255, 255), "lm", pill)
                 badge = pill.resize((w // S, h // S), LANCZOS)
             m = int(W * 0.04)
             out = Image.new("RGBA", (badge.width + 2 * m, badge.height + 2 * m), (0, 0, 0, 0))
@@ -728,8 +740,12 @@ class FrameRenderer:
         if a <= 0.004 or not text:
             return
         mask = Image.new("L", canvas.size, 0)
-        ImageDraw.Draw(mask).text((cx, cy), text, font=font, fill=255, anchor="mm")
+        emo = Image.new("RGBA", canvas.size, (0, 0, 0, 0)) if fonts.has_emoji(text) else None
+        fonts.draw_text(ImageDraw.Draw(mask), (cx, cy), text, font, 255, "mm", emo)
         canvas.paste(color, (0, 0), mask.point(_lut(round(a * opacity))))
+        if emo is not None:
+            emo.putalpha(emo.getchannel("A").point(_lut(round(a * opacity))))
+            canvas.paste(emo, (0, 0), emo)
 
     @staticmethod
     def _tbox(font, text, cx, cy):

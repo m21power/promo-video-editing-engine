@@ -125,17 +125,29 @@ def layout_text(s, W, H):
     return blocks, y
 
 
+class TextLayer(tuple):
+    """(colour, L-mask) exactly as before, plus `.emoji`: an RGBA picture with the colour emoji (or None)."""
+    emoji = None
+
+
 def text_masks(blocks, size):
-    """[(color, L-mask)] so text can be pasted quickly on every frame."""
+    """[(color, L-mask)] so text can be pasted quickly on every frame. Each item also has `.emoji` (RGBA or None):
+    paste it after the mask:  canvas.paste(layer.emoji, pos, layer.emoji)."""
     out = []
     for b in blocks:
         mask = Image.new("L", size, 0)
         d = ImageDraw.Draw(mask)
+        emo = Image.new("RGBA", size, (0, 0, 0, 0)) if any(fonts.has_emoji(it[2]) for it in b["items"]) else None
         for x, y, line, font in b["items"]:
-            d.text((x, y), line, font=font, fill=255, anchor=b["anchor"])
+            fonts.draw_text(d, (x, y), line, font, 255, b["anchor"], emo)
         if b["opacity"] < 100:
-            mask = mask.point([int(v * b["opacity"] / 100) for v in range(256)])
-        out.append((b["color"], mask))
+            lut = [int(v * b["opacity"] / 100) for v in range(256)]
+            mask = mask.point(lut)
+            if emo is not None:
+                emo.putalpha(emo.getchannel("A").point(lut))
+        layer = TextLayer((b["color"], mask))
+        layer.emoji = emo
+        out.append(layer)
     return out
 
 
@@ -145,8 +157,8 @@ def placeholder():
     w, h = 1080, 2340
     ramp = Image.linear_gradient("L").resize((w, h))
     img = Image.composite(Image.new("RGB", (w, h), (40, 44, 70)), Image.new("RGB", (w, h), (14, 16, 26)), ramp)
-    ImageDraw.Draw(img).text((w / 2, h / 2), "Select a screenshot", font=fonts.load_font("Auto", 64, False),
-                             fill=(150, 156, 190), anchor="mm")
+    fonts.draw_text(ImageDraw.Draw(img), (w / 2, h / 2), "Select a screenshot", fonts.load_font("Auto", 64, False),
+                    (150, 156, 190), "mm")
     return img
 
 
@@ -290,8 +302,11 @@ class Scene:
             mask, (x, y) = self.shadow
             cv.paste((0, 0, 0), (x + dx, y + dy), mask)
         cv.paste(self.phone, (self.phone_pos[0] + dx, self.phone_pos[1] + dy), self.phone)
-        for color, mask in self.text:
+        for layer in self.text:
+            color, mask = layer
             cv.paste(color, (tx, ty), mask)
+            if layer.emoji is not None:  # colour emoji on top of the text
+                cv.paste(layer.emoji, (tx, ty), layer.emoji)
         return cv
 
 
